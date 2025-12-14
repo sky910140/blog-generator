@@ -1,6 +1,6 @@
 # Video2Blog Local
 
-将本地视频（<60 分钟）转成带截图的 Markdown 教程，并可推送公众号草稿。后端基于 FastAPI+PostgreSQL，前端基于 Next.js 14。
+将本地视频（<30 分钟）转成带截图的 Markdown 教程，并可推送公众号草稿。后端基于 FastAPI+PostgreSQL，前端基于 Next.js 14。
 
 ## 功能概览
 - 上传 MP4/MOV 本地视频，记录为 `projects`，并存储到 `static/videos/`
