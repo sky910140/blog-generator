@@ -1,0 +1,10 @@
+static/videos/
+static/images/
+*.mp4
+*.mov
+node_modules/
+frontend/.next/
+backend/.venv/
+.venv/
+__pycache__/
+*.log
