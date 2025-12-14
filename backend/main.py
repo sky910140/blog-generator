@@ -8,6 +8,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -21,6 +22,11 @@ from .services.markdown import build_markdown
 from .services.media import capture_screenshot, get_video_duration_seconds
 from .services.task_runner import TaskRunner
 from .services.wechat import WeChatError, create_draft
+
+
+class WechatDraftRequest(BaseModel):
+    appid: str | None = None
+    secret: str | None = None
 
 settings = get_settings()
 ensure_directories(settings)
@@ -311,7 +317,10 @@ def _consume_invite(request: Request, db: Session, *, consume: bool = True) -> s
     if not invite:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="邀请码无效或已停用")
     if invite.used_count >= invite.max_uses:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="邀请码已用完")
+        # 已用尽：读取类请求继续通过，消耗类请求（consume=True）阻止
+        if consume:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="邀请码已用完")
+        return invite.code
 
     if consume:
         invite.used_count += 1
@@ -334,9 +343,16 @@ def _require_project_access(request: Request, db: Session, project: Project | No
 
 
 @app.post("/api/wechat/draft")
-async def create_wechat_draft(project_id: uuid.UUID, request: Request, db: Session = Depends(get_session)):
-    if not settings.wechat_appid or not settings.wechat_secret:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="未配置 WECHAT_APPID/WECHAT_SECRET")
+async def create_wechat_draft(
+    project_id: uuid.UUID,
+    request: Request,
+    payload: WechatDraftRequest | None = None,
+    db: Session = Depends(get_session),
+):
+    appid = (payload.appid if payload else None) or settings.wechat_appid
+    secret = (payload.secret if payload else None) or settings.wechat_secret
+    if not appid or not secret:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="需要提供 WECHAT_APPID/WECHAT_SECRET")
     project = db.get(Project, project_id)
     _require_project_access(request, db, project)
     content = db.query(Content).filter(Content.project_id == project_id).one_or_none()
@@ -360,6 +376,8 @@ async def create_wechat_draft(project_id: uuid.UUID, request: Request, db: Sessi
             summary=content.ai_raw_data.get("summary") if content.ai_raw_data else "",
             markdown=content.markdown_content,
             image_paths=image_paths,
+            appid=appid,
+            secret=secret,
         )
         return {"success": True, "draft_media_id": media_id}
     except WeChatError as exc:

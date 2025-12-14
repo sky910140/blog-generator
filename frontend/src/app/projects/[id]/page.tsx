@@ -29,6 +29,9 @@ export default function ProjectDetailPage() {
   const [copied, setCopied] = useState(false);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [pushing, setPushing] = useState(false);
+  const [showWechatModal, setShowWechatModal] = useState(false);
+  const [wechatAppId, setWechatAppId] = useState("");
+  const [wechatAppSecret, setWechatAppSecret] = useState("");
 
   useEffect(() => {
     if (content?.markdown_content) {
@@ -73,15 +76,24 @@ export default function ProjectDetailPage() {
     }
   };
 
-  const handleWechatDraft = async () => {
+  const handleWechatDraft = () => {
+    setShowWechatModal(true);
+  };
+
+  const handleSubmitWechatDraft = async () => {
     if (!projectId) return;
+    if (!wechatAppId.trim() || !wechatAppSecret.trim()) {
+      setMessage("??? AppID ? AppSecret");
+      return;
+    }
     setPushing(true);
     setMessage(null);
     try {
-      await pushWechatDraft(projectId);
-      setMessage("已推送到公众号草稿");
+      await pushWechatDraft(projectId, wechatAppId.trim(), wechatAppSecret.trim());
+      setMessage("?????????");
+      setShowWechatModal(false);
     } catch (err: any) {
-      setMessage(err.message || "推送失败");
+      setMessage(err.message || "????");
     } finally {
       setPushing(false);
     }
@@ -203,6 +215,70 @@ export default function ProjectDetailPage() {
           </div>
         </div>
       </div>
+
+      {showWechatModal && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1200,
+          }}
+        >
+          <div
+            style={{
+              width: "min(520px, 92vw)",
+              background: "#0b1224",
+              border: "1px solid #1f2937",
+              borderRadius: 12,
+              padding: 16,
+              boxShadow: "0 12px 50px rgba(0,0,0,0.35)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>推送到公众号草稿</div>
+              <button className="btn" style={{ padding: "4px 10px" }} onClick={() => setShowWechatModal(false)} disabled={pushing}>
+                关闭
+              </button>
+            </div>
+            <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 10, lineHeight: 1.6 }}>
+              请将服务器 IP 加入公众号「API IP 白名单」，否则微信接口会拒绝访问。
+              当前访问来源：{typeof window !== "undefined" ? window.location.hostname : "请填写服务器 IP"}。
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                AppID
+                <input
+                  value={wechatAppId}
+                  onChange={(e) => setWechatAppId(e.target.value)}
+                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1f2937", background: "#0f172a", color: "#e5e7eb" }}
+                  placeholder="请输入公众号 AppID"
+                />
+              </label>
+              <label style={{ display: "grid", gap: 4, fontSize: 13 }}>
+                AppSecret
+                <input
+                  value={wechatAppSecret}
+                  onChange={(e) => setWechatAppSecret(e.target.value)}
+                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #1f2937", background: "#0f172a", color: "#e5e7eb" }}
+                  placeholder="请输入公众号 AppSecret"
+                />
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button className="btn" onClick={() => setShowWechatModal(false)} disabled={pushing}>
+                取消
+              </button>
+              <button className="btn" onClick={handleSubmitWechatDraft} disabled={pushing}>
+                {pushing ? "推送中..." : "确认推送"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {previewSrc && (
         <div

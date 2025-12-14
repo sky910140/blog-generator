@@ -51,7 +51,7 @@ export default function DashboardPage() {
     void verifyInvite();
   }, [verifyInvite]);
 
-  // 读取本地邀请码并自动校验
+  // 读取本地邀请码并自动校验（仅初始化运行，避免输入时被重置）
   useEffect(() => {
     if (typeof window === "undefined") return;
     const stored = (typeof sessionStorage !== "undefined" && sessionStorage.getItem("inviteCode")) || "";
@@ -67,7 +67,8 @@ export default function DashboardPage() {
         })();
       }
     }
-  }, [verifyInvite]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleUpload = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {

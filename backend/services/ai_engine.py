@@ -2,40 +2,39 @@ import logging
 import math
 import mimetypes
 import time
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict
 
 import google.generativeai as gen
 from google.api_core import exceptions as google_exceptions
-import json
 
 
-PROMPT = """你是“人生进化指南”主理人 Sky 的口吻，和读者并肩同行，不说教。请观看视频，用通俗、温暖、接地气的语言写给初学者，必要时举例或比喻，让零基础也能跟做。输出结构化 JSON（不要返回多余文本）。
+PROMPT = """你是“人类进化指南”导师 Sky，用口语化、共情的语气给初学者讲解视频内容。请观看视频，只输出 JSON（不要额外文字）。
 输出格式:
 {
-  "headline": "吸引人、有深度、不浮夸的标题，避免“课程/教程/入门课”等字样，可用“技巧/诀窍/心法” framing",
-  "summary": "一句话摘要",
+  "headline": "有吸引力的标题，避免“教程/课程/讲解”等，可用“技巧/方法/避坑”等 framing",
+  "summary": "一两句话摘要",
   "steps": [
     {
       "step_index": 1,
-      "timestamp": 125,  # 使用秒，取整
-      "title": "步骤标题（简短）",
-      "description": "详细操作说明，语气友好，结合“为什么这么做”+“怎么做”，给出注意点/踩坑提醒/小贴士，必要时举例或比喻"
+      "timestamp": 125,  // 单位秒，取整
+      "title": "步骤标题（简洁）",
+      "description": "详细操作说明，口语化，包含为什么/怎么做/注意事项/提醒/常见坑，可给例子"
     }
   ]
 }
-要求：
-- 选择 4-10 个关键步骤，覆盖完整流程，时间戳使用秒且递增。
-- 语言友好、口语化，避免生硬术语；有术语用括号解释；给出“为什么”和“怎么做”。
-- 像同行者分享经验，可穿插“我”的体会/踩坑/提醒，让读者安心；适当比喻（风暴与星光、泥泞与道路等）。
-- 如无明确步骤，提炼主要画面变化/操作节点，并说明意义。
-- 若有代码或配置，描述核心片段的作用与效果，不粘贴长代码。
-- 只返回 JSON。
+要求:
+- 选 4-10 个关键步骤，覆盖完整流程，时间戳用秒并递增
+- 语言亲和、准确；给出“为什么/怎么做”，适当提醒/避坑/例子
+- 如有代码/配置，描述关键片段和效果，不要长代码块
+- 如果无法识别视频内容，返回 {"reason": "...无法识别原因...", "steps": []}
+- 只返回 JSON
 """
 
 
 class AIEngine:
     """
-    Gemini 1.5 调用封装；若未配置 API Key，则回退到占位生成。
+    Gemini 调用封装；若无 API Key 则返回占位结果。
     """
 
     def __init__(self, api_key: str | None = None, timeout_seconds: int = 120, model_name: str = "models/gemini-2.5-flash"):
@@ -46,19 +45,23 @@ class AIEngine:
     def _synthetic_steps(self, duration: int) -> Dict[str, Any]:
         logging.warning("AIEngine: using synthetic steps (no API key or fallback).")
         steps = []
-        step_count = max(4, min(8, math.ceil(duration / 120)))
-        interval = max(10, duration // (step_count + 1))
+        step_count = max(4, min(8, math.ceil(duration / 120))) if duration > 0 else 4
+        interval = max(10, duration // (step_count + 1)) if duration > 0 else 10
         for idx in range(step_count):
-            timestamp = min(duration - 1, (idx + 1) * interval)
+            timestamp = min(max(duration - 1, 0), (idx + 1) * interval)
             steps.append(
                 {
                     "step_index": idx + 1,
                     "timestamp": timestamp,
                     "title": f"步骤 {idx + 1}",
-                    "description": f"在 {timestamp} 秒附近的关键操作描述。",
+                    "description": f"在 {timestamp} 秒的关键操作描述（占位，未调用真实 AI）。",
                 }
             )
-        return {"summary": "自动生成的占位摘要。请替换为真实 AI 输出。", "steps": steps}
+        return {
+            "headline": "占位标题（未调用真实 AI）",
+            "summary": "自动生成的占位摘要（未调用真实 AI，请配置 GEMINI_API_KEY）。",
+            "steps": steps,
+        }
 
     def _upload_video(self, video_path: str):
         mime, _ = mimetypes.guess_type(video_path)
@@ -128,7 +131,7 @@ class AIEngine:
                 logging.exception("AIEngine: Gemini call failed with model %s", model_name)
                 break
 
-        # 回退到占位生成，避免整个流程失败
+        # 退回占位生成，避免流程失败
         return self._synthetic_steps(duration)
 
 

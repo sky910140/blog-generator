@@ -116,10 +116,11 @@ export async function exportZip(id: string): Promise<Blob> {
   return res.blob();
 }
 
-export async function pushWechatDraft(id: string) {
+export async function pushWechatDraft(id: string, appid: string, secret: string) {
   const res = await fetch(`${API_BASE}/api/wechat/draft?project_id=${id}`, {
     method: "POST",
-    headers: getInviteHeaders(),
+    headers: { "Content-Type": "application/json", ...getInviteHeaders() },
+    body: JSON.stringify({ appid, secret }),
   });
   if (!res.ok) {
     let detail = "推送失败";

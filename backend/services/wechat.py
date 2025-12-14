@@ -1,32 +1,37 @@
 import os
 import time
-from typing import Dict, List, Tuple
+import json
+from typing import Dict, List, Tuple, Optional
 
 import httpx
-import json
 
 from ..config import get_settings
 
 settings = get_settings()
 
-_cached_token: Tuple[str, float] | None = None  # (token, expire_ts)
+# 缓存不同 appid/secret 下的 token
+_cached_token: Dict[Tuple[str, str], Tuple[str, float]] = {}
 
 
 class WeChatError(Exception):
     pass
 
 
-async def get_access_token() -> str:
-    global _cached_token
-    if _cached_token and _cached_token[1] > time.time() + 60:
-        return _cached_token[0]
-    if not settings.wechat_appid or not settings.wechat_secret:
+async def get_access_token(appid: Optional[str] = None, secret: Optional[str] = None) -> str:
+    appid = appid or settings.wechat_appid
+    secret = secret or settings.wechat_secret
+    if not appid or not secret:
         raise WeChatError("WECHAT_APPID 或 WECHAT_SECRET 未配置")
+    key = (appid, secret)
+    cached = _cached_token.get(key)
+    if cached and cached[1] > time.time() + 60:
+        return cached[0]
+
     url = "https://api.weixin.qq.com/cgi-bin/token"
     params = {
         "grant_type": "client_credential",
-        "appid": settings.wechat_appid,
-        "secret": settings.wechat_secret,
+        "appid": appid,
+        "secret": secret,
     }
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(url, params=params)
@@ -35,15 +40,15 @@ async def get_access_token() -> str:
         raise WeChatError(f"获取 access_token 失败: {data}")
     token = data["access_token"]
     expire = time.time() + int(data.get("expires_in", 7200))
-    _cached_token = (token, expire)
+    _cached_token[key] = (token, expire)
     return token
 
 
-async def upload_image(abs_path: str) -> Tuple[str, str]:
+async def upload_image(abs_path: str, *, appid: Optional[str] = None, secret: Optional[str] = None, token: Optional[str] = None) -> Tuple[str, str]:
     """
-    上传图片素材，返回 (media_id, url)。
+    上传图片素材，返回 (media_id, url)
     """
-    token = await get_access_token()
+    token = token or await get_access_token(appid, secret)
     upload_url = f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={token}&type=image"
     if not os.path.exists(abs_path):
         raise WeChatError(f"文件不存在: {abs_path}")
@@ -68,8 +73,7 @@ def truncate_utf8(text: str, max_bytes: int) -> str:
 
 def truncate_title(text: str) -> str:
     """
-    微信标题严格限制，经验上控制在更紧的上限以避免 45003。
-    规则：去空格 -> 最多 12 字符 -> 最多 30 字节。
+    微信标题字符限制：先取前 12 字，再截断到 30 字节，避免 45003 错误。
     """
     if not text:
         return "未命名"
@@ -101,38 +105,35 @@ def markdown_to_wechat_html(md: str, img_map: Dict[str, str]) -> str:
     return "\n".join(html_parts)
 
 
-async def create_draft(project_title: str, summary: str, markdown: str, image_paths: List[str]) -> str:
+async def create_draft(project_title: str, summary: str, markdown: str, image_paths: List[str], *, appid: Optional[str] = None, secret: Optional[str] = None) -> str:
     """
     上传图片 -> 生成图文 -> 创建草稿，返回 draft media_id
     """
-    token = await get_access_token()
+    token = await get_access_token(appid, secret)
 
     # 上传图片并映射
     img_map: Dict[str, str] = {}
     media_ids: List[str] = []
     for p in image_paths:
         try:
-            media_id, url = await upload_image(p)
+            media_id, url = await upload_image(p, appid=appid, secret=secret, token=token)
             media_ids.append(media_id)
-            # 记录原始相对路径（/static/...）和本地路径的映射
             rel_key = p.replace("\\", "/")
             if rel_key.startswith("./"):
                 rel_key = rel_key[2:]
             if not rel_key.startswith("/"):
                 rel_key = "/" + rel_key
             img_map[rel_key] = url or ""
-        except Exception as exc:
-            # 忽略单张失败
+        except Exception:
+            # 忽略单张上传失败
             continue
 
     content_html = markdown_to_wechat_html(markdown, img_map)
     thumb_media_id = media_ids[0] if media_ids else None
 
     draft_url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={token}"
-    # 微信标题限制严格，先用字符/字节双重截断
     title = truncate_title(project_title or "未命名")
     raw_digest = (summary or "").strip()
-    # 再次收紧描述长度，控制在 60 字节以内，避免 45004
     digest = truncate_utf8(raw_digest, 60) or "摘要待补充"
     article = {
         "title": title,
