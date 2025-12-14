@@ -20,6 +20,7 @@ from .services.ai_engine import build_ai_engine
 from .services.downloader import save_upload_file
 from .services.markdown import build_markdown
 from .services.media import capture_screenshot, get_video_duration_seconds
+from .services.storage import SupabaseStorageClient
 from .services.task_runner import TaskRunner
 from .services.wechat import WeChatError, create_draft
 
@@ -29,6 +30,15 @@ class WechatDraftRequest(BaseModel):
     secret: str | None = None
 
 settings = get_settings()
+if not settings.supabase_url or not settings.supabase_service_role_key:
+    raise RuntimeError("Supabase storage未配置，请设置 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY")
+storage_public_base = settings.supabase_storage_public_url or f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public"
+storage_client = SupabaseStorageClient(
+    settings.supabase_url,
+    settings.supabase_service_role_key,
+    public_base_url=storage_public_base,
+)
+# 若仍需本地静态目录，可保留，但主存储依赖 Supabase
 ensure_directories(settings)
 
 app = FastAPI(title="Video2Blog Local")
@@ -110,17 +120,17 @@ def _process_project(project_id: uuid.UUID, video_path: str):
             session.commit()
         _update_project(session, project, progress=60)
 
-        image_base_dir = os.path.join(settings.static_dir, settings.images_dir_name)
         for step in steps:
             raw_ts = int(step.get("timestamp", 0))
             # Clamp timestamp to video duration range [0, duration-1]
             ts = max(0, min(raw_ts, max(duration - 1, 0)))
             step["timestamp"] = ts
             try:
-                image_path = capture_screenshot(
-                    video_path,
-                    ts,
-                    image_base_dir,
+                image_url = capture_screenshot(
+                    video_path=video_path,
+                    timestamp=ts,
+                    storage=storage_client,
+                    bucket=settings.supabase_bucket_images,
                     ffmpeg_path=settings.ffmpeg_path,
                     project_id=str(project.id),
                     watermark_remove=False,  # 保持原始清晰度，不做水印处理
@@ -128,8 +138,7 @@ def _process_project(project_id: uuid.UUID, video_path: str):
             except Exception as exc:
                 _update_project(session, project, status_value=ProjectStatus.failed.value, error=str(exc), progress=100)
                 return
-            rel_image_path = f"/static/{settings.images_dir_name}/{os.path.basename(image_path)}"
-            step["image_path"] = rel_image_path
+            step["image_path"] = image_url
 
         _update_project(session, project, progress=90)
 
@@ -145,6 +154,10 @@ def _process_project(project_id: uuid.UUID, video_path: str):
 
         _update_project(session, project, status_value=ProjectStatus.completed.value, progress=100, error=None)
     finally:
+        try:
+            os.remove(video_path)
+        except OSError:
+            pass
         session.close()
 
 
@@ -156,16 +169,18 @@ async def upload_project(
     db: Session = Depends(get_session),
 ):
     code = _consume_invite(request, db)
-    video_dir = os.path.join(settings.static_dir, settings.videos_dir_name)
-    video_path = save_upload_file(file, video_dir)
-    rel_video_path = f"/static/{settings.videos_dir_name}/{os.path.basename(video_path)}"
+    local_video_path, remote_video_url = save_upload_file(
+        file,
+        storage_client=storage_client,
+        bucket=settings.supabase_bucket_videos,
+    )
     title = os.path.splitext(file.filename or "未命名视频")[0]
 
     project = Project(
         title=title,
         invite_code=code,
         source_type="local_file",
-        local_video_path=rel_video_path,
+        local_video_path=remote_video_url,
         status=ProjectStatus.pending.value,
         progress=0,
     )
@@ -180,7 +195,7 @@ async def upload_project(
         db.add(placeholder)
         db.commit()
 
-    background_tasks.add_task(task_runner.submit, str(project.id), _process_project, project.id, video_path)
+    background_tasks.add_task(task_runner.submit, str(project.id), _process_project, project.id, local_video_path)
     return ProjectCreateResponse(project_id=project.id, status=project.status)
 
 
@@ -241,18 +256,12 @@ def export_project(project_id: uuid.UUID, request: Request, db: Session = Depend
     import re
     memfile = io.BytesIO()
     import zipfile
+    import httpx
 
     def safe_name(name: str) -> str:
         # Restrict to ASCII to avoid header encoding issues in Content-Disposition
         clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_")
         return clean or "export"
-
-    def resolve_path(path: str) -> str:
-        rel = path.lstrip("/")
-        if rel.startswith("static/"):
-            rel = rel[len("static/") :]
-        abs_path = os.path.join(settings.static_dir, rel)
-        return abs_path
 
     with zipfile.ZipFile(memfile, "w", zipfile.ZIP_DEFLATED) as zf:
         md_name = f"{safe_name(project.title or 'export')}.md"
@@ -263,13 +272,13 @@ def export_project(project_id: uuid.UUID, request: Request, db: Session = Depend
                 path = step.get("image_path")
                 if not path:
                     continue
-                abs_path = resolve_path(path)
-                if os.path.exists(abs_path):
-                    try:
-                        zf.write(abs_path, arcname=os.path.join("images", os.path.basename(abs_path)))
-                    except FileNotFoundError:
-                        # skip missing files to avoid export failure
-                        continue
+                # download remote image
+                try:
+                    resp = httpx.get(path, timeout=20)
+                    resp.raise_for_status()
+                    zf.writestr(os.path.join("images", os.path.basename(path)), resp.content)
+                except Exception:
+                    continue
     memfile.seek(0)
     filename = f"{safe_name(project.title or 'export')}.zip"
     return StreamingResponse(
@@ -364,18 +373,31 @@ async def create_wechat_draft(
     if content.ai_raw_data:
         for step in content.ai_raw_data.get("steps", []):
             path = step.get("image_path")
-            if path and path.startswith("/static/"):
-                rel = path.lstrip("/")
-                abs_path = os.path.join(settings.static_dir, rel[len("static/") :])
-                if os.path.exists(abs_path):
-                    image_paths.append(abs_path)
+            if path:
+                image_paths.append(path)
 
     try:
+        # download remote images to temp files for WeChat upload
+        temp_paths: list[str] = []
+        import httpx
+        import tempfile
+
+        for url in image_paths:
+            try:
+                resp = httpx.get(url, timeout=30)
+                resp.raise_for_status()
+                fd, tmp_path = tempfile.mkstemp(suffix=os.path.splitext(url)[1] or ".jpg")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(resp.content)
+                temp_paths.append(tmp_path)
+            except Exception:
+                continue
+
         media_id = await create_draft(
             project_title=project.title or "未命名",
             summary=content.ai_raw_data.get("summary") if content.ai_raw_data else "",
             markdown=content.markdown_content,
-            image_paths=image_paths,
+            image_paths=temp_paths,
             appid=appid,
             secret=secret,
         )
@@ -384,3 +406,10 @@ async def create_wechat_draft(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    finally:
+        # cleanup temp files
+        for p in locals().get("temp_paths", []):
+            try:
+                os.remove(p)
+            except OSError:
+                pass

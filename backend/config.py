@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     ffmpeg_path: str = Field("ffmpeg", description="FFmpeg binary path")
     ffprobe_path: str = Field("ffprobe", description="FFprobe binary path")
     task_concurrency: int = Field(3, description="Max concurrent processing tasks")
+    # Supabase Storage (for stateless deployments)
+    supabase_url: str | None = Field(None, description="Supabase project URL, e.g. https://xxxx.supabase.co")
+    supabase_service_role_key: str | None = Field(None, description="Supabase service role key for server-side uploads")
+    supabase_storage_public_url: str | None = Field(None, description="Base public URL for Supabase storage (optional override)")
+    supabase_bucket_videos: str = Field("videos", description="Supabase bucket name for videos")
+    supabase_bucket_images: str = Field("images", description="Supabase bucket name for images")
     # Watermark removal (soft blur) settings for screenshots
     watermark_remove: bool = Field(False, description="Enable watermark blur on screenshots")
     watermark_width_ratio: float = Field(0.12, description="Watermark width ratio of frame (0-1)")

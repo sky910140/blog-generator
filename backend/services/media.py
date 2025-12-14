@@ -1,7 +1,10 @@
 import os
 import subprocess
 import uuid
+import tempfile
 from typing import List
+
+from .storage import SupabaseStorageClient
 
 
 def get_video_duration_seconds(video_path: str, ffprobe_path: str = "ffprobe") -> int:
@@ -52,7 +55,8 @@ def get_video_resolution(video_path: str, ffprobe_path: str = "ffprobe") -> tupl
 def capture_screenshot(
     video_path: str,
     timestamp: int,
-    output_dir: str,
+    storage: SupabaseStorageClient,
+    bucket: str,
     ffmpeg_path: str = "ffmpeg",
     project_id: str | None = None,
     watermark_remove: bool = False,
@@ -62,27 +66,25 @@ def capture_screenshot(
     wm_y_ratio: float = 0.85,
     wm_blur: int = 20,
 ) -> str:
-    """Capture a single frame at timestamp seconds, returns file path."""
-    os.makedirs(output_dir, exist_ok=True)
+    """Capture a frame, upload to Supabase, return public URL."""
+    tmp_dir = tempfile.mkdtemp()
     unique = uuid.uuid4().hex
     prefix = f"{project_id}_" if project_id else ""
     filename = f"{prefix}{timestamp}_{unique}.jpg"
-    output_path = os.path.join(output_dir, filename)
+    output_path = os.path.join(tmp_dir, filename)
 
     filters: list[str] = []
     if watermark_remove:
         try:
-            width, height = get_video_resolution(video_path)
+            width, height = get_video_resolution(video_path, ffprobe_path=ffmpeg_path.replace("ffmpeg", "ffprobe"))
             wm_w = max(4, int(width * wm_w_ratio))
             wm_h = max(4, int(height * wm_h_ratio))
             wm_x = int(width * wm_x_ratio)
             wm_y = int(height * wm_y_ratio)
-            # Clamp ROI within frame
             wm_x = max(0, min(wm_x, width - wm_w))
             wm_y = max(0, min(wm_y, height - wm_h))
             if wm_x + wm_w > width or wm_y + wm_h > height:
                 raise ValueError("watermark ROI invalid")
-            # 轻度模糊填充，避免色块/线条
             filters.append(
                 f"split[a][b];"
                 f"[b]crop={wm_w}:{wm_h}:{wm_x}:{wm_y},"
@@ -90,7 +92,6 @@ def capture_screenshot(
                 f"[a][wm]overlay={wm_x}:{wm_y}"
             )
         except Exception:
-            # 如果解析分辨率失败，不处理水印，避免出错
             pass
     filter_str = ",".join(filters) if filters else None
 
@@ -111,18 +112,34 @@ def capture_screenshot(
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr}")
-    return output_path
+
+    remote_url = storage.upload_file(bucket, output_path, filename)
+    try:
+        os.remove(output_path)
+    except OSError:
+        pass
+    return remote_url
 
 
 def batch_capture_screenshots(
     video_path: str,
     timestamps: List[int],
-    output_dir: str,
+    storage: SupabaseStorageClient,
+    bucket: str,
     ffmpeg_path: str = "ffmpeg",
     project_id: str | None = None,
 ) -> List[str]:
-    """Capture multiple frames; returns list of paths."""
+    """Capture multiple frames; returns list of URLs."""
     images = []
     for ts in timestamps:
-        images.append(capture_screenshot(video_path, ts, output_dir, ffmpeg_path, project_id))
+        images.append(
+            capture_screenshot(
+                video_path,
+                ts,
+                storage=storage,
+                bucket=bucket,
+                ffmpeg_path=ffmpeg_path,
+                project_id=project_id,
+            )
+        )
     return images
